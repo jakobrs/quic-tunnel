@@ -86,17 +86,11 @@ async fn handle_client(mut client: TcpStream, conn: quinn::Connection) -> Result
         recv_stream,
     };
 
-    match tokio::io::copy_bidirectional(&mut client, &mut quinn_bi_stream).await {
-        Ok(stats) => {
-            log::info!("Stats: {stats:?}");
-            log::info!("Closing connection with client, and stream");
-            quinn_bi_stream.send_stream.finish().await?;
-            return Ok(());
-        }
-        Err(err) => {
-            log::info!("Connection error, closing");
-            quinn_bi_stream.send_stream.finish().await?;
-            return Err(err.into());
-        }
-    }
+    let stats = tokio::io::copy_bidirectional(&mut client, &mut quinn_bi_stream).await?;
+    log::info!("Stats: {stats:?}");
+
+    log::info!("Closing connection with client, and stream");
+    quinn_bi_stream.send_stream.finish().await?;
+
+    return Ok(());
 }
