@@ -93,36 +93,36 @@ struct Acceptor {
 
 impl Acceptor {
     fn new(incoming: quinn::Incoming) -> Self {
-        let flattened_incoming_stream = incoming
-            .map(|a| {
-                a.map(|b| b.map(|c| c.bi_streams))
-                    .try_flatten_stream()
-                    .take_while(|d| {
-                        let err = d.as_ref().err().cloned();
-
-                        async move {
-                            if let Some(err) = err {
-                                log::error!("Connection error: {err}");
-                                false
-                            } else {
-                                true
-                            }
-                        }
-                    })
-                    .map(|d| match d {
-                        Ok((send_stream, recv_stream)) => QuinnBiStream {
-                            send_stream,
-                            recv_stream,
-                        },
-                        Err(_e) => unreachable!(),
-                    })
-                    .boxed() // required to make the stream `Unpin`
-            })
-            .flatten_unordered(None)
-            .boxed();
+        // inner: FlattenUnordered<Map<Incoming, |Connecting| ->
+        // Map<TakeWhile<TryFlattenStream<Map<Connecting, |Result<NewConnection, ConnectionError>| -> Result<IncomingBiStreams,
+        // ConnectionError>>>, Ready<bool>, |&Result<(SendStream, RecvStream), ConnectionError>| -> Ready<bool>>,
+        // |Result<(SendStream, RecvStream), ConnectionError>| -> QuinnBiStream>>>
 
         Self {
-            inner: flattened_incoming_stream,
+            inner: incoming
+                .map(|a| {
+                    a.map(|b| b.map(|c| c.bi_streams))
+                        .try_flatten_stream()
+                        .take_while(|d| {
+                            let err = d.as_ref().err().cloned();
+
+                            if let Some(err) = err {
+                                log::error!("Connection error: {err}");
+                                futures_util::future::ready(false)
+                            } else {
+                                futures_util::future::ready(true)
+                            }
+                        })
+                        .map(|d| match d {
+                            Ok((send_stream, recv_stream)) => QuinnBiStream {
+                                send_stream,
+                                recv_stream,
+                            },
+                            Err(_e) => unreachable!(),
+                        })
+                })
+                .flatten_unordered(None)
+                .boxed(),
         }
     }
 }
