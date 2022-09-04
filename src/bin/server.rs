@@ -93,32 +93,32 @@ struct Acceptor {
 
 impl Acceptor {
     fn new(incoming: quinn::Incoming) -> Self {
-        Self {
-            inner: incoming
-                .flat_map_unordered(None, |a| {
-                    a.map(|b| b.map(|c| c.bi_streams))
-                        .try_flatten_stream()
-                        .take_while(|d| {
-                            futures_util::future::ready({
-                                let err = d.as_ref().err().cloned();
+        let flattened_incoming_stream = incoming.flat_map_unordered(None, |a| {
+            a.map(|b| b.map(|c| c.bi_streams))
+                .try_flatten_stream()
+                .take_while(|d| {
+                    futures_util::future::ready({
+                        let err = d.as_ref().err().cloned();
 
-                                if let Some(err) = err {
-                                    log::error!("Connection error: {err}");
-                                    false
-                                } else {
-                                    true
-                                }
-                            })
-                        })
-                        .map(|d| match d {
-                            Ok((send_stream, recv_stream)) => QuinnBiStream {
-                                send_stream,
-                                recv_stream,
-                            },
-                            Err(_e) => unreachable!(),
-                        })
+                        if let Some(err) = err {
+                            log::error!("Connection error: {err}");
+                            false
+                        } else {
+                            true
+                        }
+                    })
                 })
-                .boxed(),
+                .map(|d| match d {
+                    Ok((send_stream, recv_stream)) => QuinnBiStream {
+                        send_stream,
+                        recv_stream,
+                    },
+                    Err(_e) => unreachable!(),
+                })
+        });
+
+        Self {
+            inner: flattened_incoming_stream.boxed(),
         }
     }
 }
@@ -132,10 +132,7 @@ impl Accept for Acceptor {
         self: Pin<&mut Self>,
         cx: &mut task::Context<'_>,
     ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
-        self.get_mut()
-            .inner
-            .poll_next_unpin(cx)
-            .map(|c| c.map(|d| Ok(d)))
+        self.get_mut().inner.poll_next_unpin(cx).map(|c| c.map(Ok))
     }
 }
 
