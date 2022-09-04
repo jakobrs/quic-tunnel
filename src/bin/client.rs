@@ -89,8 +89,5 @@ async fn handle_client(mut client: TcpStream, conn: quinn::Connection) -> Result
     let stats = tokio::io::copy_bidirectional(&mut client, &mut quinn_bi_stream).await?;
     log::info!("Stats: {stats:?}");
 
-    log::info!("Closing connection with client, and stream");
-    quinn_bi_stream.send_stream.finish().await?;
-
     return Ok(());
 }
