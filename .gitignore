@@ -1,0 +1,6 @@
+/target
+
+# Certs
+/server
+/client
+/CAcert.pem
