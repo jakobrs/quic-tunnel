@@ -4,7 +4,6 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    str::FromStr,
     sync::Arc,
     task::{self, Poll},
     time::Duration,
