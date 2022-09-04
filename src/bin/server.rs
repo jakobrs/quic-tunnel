@@ -1,6 +1,5 @@
 use std::{
     convert::Infallible,
-    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
@@ -11,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures_util::{FutureExt, Stream, StreamExt, TryFutureExt};
 use hyper::{
     client::HttpConnector,
     server::accept::Accept,
@@ -89,30 +88,41 @@ async fn main() -> Result<()> {
 }
 
 struct Acceptor {
-    incoming: quinn::Incoming,
-    connecting: FuturesUnordered<quinn::Connecting>,
-    streams: FuturesUnordered<
-        Pin<
-            Box<
-                dyn Future<
-                    Output = (
-                        quinn::IncomingBiStreams,
-                        Option<
-                            Result<(quinn::SendStream, quinn::RecvStream), quinn::ConnectionError>,
-                        >,
-                    ),
-                >,
-            >,
-        >,
-    >,
+    inner: Pin<Box<dyn Stream<Item = QuinnBiStream> + Send>>,
 }
 
 impl Acceptor {
     fn new(incoming: quinn::Incoming) -> Self {
+        let flattened_incoming_stream = incoming
+            .map(|a| {
+                a.map(|b| b.map(|c| c.bi_streams))
+                    .try_flatten_stream()
+                    .take_while(|d| {
+                        let err = d.as_ref().err().cloned();
+
+                        async move {
+                            if let Some(err) = err {
+                                log::error!("Connection error: {err}");
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                    })
+                    .map(|d| match d {
+                        Ok((send_stream, recv_stream)) => QuinnBiStream {
+                            send_stream,
+                            recv_stream,
+                        },
+                        Err(_e) => unreachable!(),
+                    })
+                    .boxed() // required to make the stream `Unpin`
+            })
+            .flatten_unordered(None)
+            .boxed();
+
         Self {
-            incoming,
-            connecting: FuturesUnordered::new(),
-            streams: FuturesUnordered::new(),
+            inner: flattened_incoming_stream,
         }
     }
 }
@@ -120,73 +130,16 @@ impl Acceptor {
 impl Accept for Acceptor {
     type Conn = QuinnBiStream;
 
-    type Error = anyhow::Error;
+    type Error = Infallible;
 
     fn poll_accept(
         self: Pin<&mut Self>,
         cx: &mut task::Context<'_>,
     ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
-        let this = self.get_mut();
-
-        while let Poll::Ready(conn) = this.incoming.poll_next_unpin(cx) {
-            match conn {
-                Some(conn) => {
-                    log::info!("Received connection from {}", conn.remote_address());
-                    this.connecting.push(conn);
-                }
-                None => {
-                    log::error!("this.incoming: end of stream");
-                    return Poll::Ready(Some(Err(anyhow::anyhow!("this.incoming: end of stream"))));
-                }
-            };
-        }
-
-        while let Poll::Ready(Some(conn)) = this.connecting.poll_next_unpin(cx) {
-            match conn {
-                Ok(mut conn) => {
-                    log::info!(
-                        "Established connection with {}",
-                        conn.connection.remote_address()
-                    );
-
-                    this.streams.push(
-                        async move {
-                            let stream = conn.bi_streams.next().await;
-
-                            (conn.bi_streams, stream)
-                        }
-                        .boxed(),
-                    );
-                }
-                Err(err) => log::error!("Connection error: {err}"),
-            }
-        }
-
-        while let Poll::Ready(Some((mut streamstream, conn))) = this.streams.poll_next_unpin(cx) {
-            match conn {
-                Some(Ok((send_stream, recv_stream))) => {
-                    this.streams.push(
-                        async move {
-                            let stream = streamstream.next().await;
-
-                            (streamstream, stream)
-                        }
-                        .boxed(),
-                    );
-
-                    log::info!("Opened stream");
-                    return Poll::Ready(Some(Ok(QuinnBiStream {
-                        send_stream,
-                        recv_stream,
-                    })));
-                }
-
-                Some(Err(err)) => log::error!("Stream open error: {err}"),
-                None => todo!(),
-            }
-        }
-
-        Poll::Pending
+        self.get_mut()
+            .inner
+            .poll_next_unpin(cx)
+            .map(|c| c.map(|d| Ok(d)))
     }
 }
 
